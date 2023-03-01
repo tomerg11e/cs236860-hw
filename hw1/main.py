@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from scipy.io import loadmat
 from typing import List, Dict
@@ -11,24 +12,28 @@ NUM_IMAGES = None
 
 
 def calculate_point_spread_function(motion_paths: Dict[str, np.ndarray], size_response_box: float = 1,
-                                    plot: bool = False):
+                                    plot: bool = False, save: bool = True):
+    psf_directory = "psf_matrices"
+    if save and not os.path.exists(psf_directory):
+        os.makedirs(psf_directory)
+
     motion_x, motion_y = motion_paths["X"][:NUM_IMAGES], motion_paths["Y"][:NUM_IMAGES]
     psf_matrices = []
 
     min_value = int(min(np.min(motion_x), np.min(motion_y)))
     max_value = int(max(np.max(motion_x), np.max(motion_y)))
 
-    x_bins = np.arange(min_value, max_value + size_response_box, step=size_response_box, dtype=float)
-    y_bins = np.arange(min_value, max_value + size_response_box, step=size_response_box, dtype=float)
+    x_bins = np.arange(min_value, max_value + 1, dtype=float)
+    y_bins = np.arange(min_value, max_value + 1, dtype=float)
 
-    # Center the pixels
-    x_bins -= size_response_box / 2
-    y_bins -= size_response_box / 2
+    # Center the pixels and resize to the response box size
+    x_bins = (x_bins - 1 / 2) * size_response_box
+    y_bins = (y_bins - 1 / 2) * size_response_box
 
     x_range = [x_bins[0], x_bins[-1]]
     y_range = [y_bins[0], y_bins[-1]]
 
-    for x, y in zip(motion_x, motion_y):
+    for index, (x, y) in enumerate(zip(motion_x, motion_y)):
         if plot:
             # Plot the trajectory
             plt.scatter([x[0], x[-1]], [y[0], y[-1]], c=["green", "red"])
@@ -44,41 +49,51 @@ def calculate_point_spread_function(motion_paths: Dict[str, np.ndarray], size_re
         if plot:
             plt.imshow(histogram, cmap="gray", origin="lower", extent=[*x_range, *y_range])
             plt.show()
+        if save:
+            np.save(os.path.join(psf_directory, f"matrix_{index}.npy"), histogram)
 
     return psf_matrices
 
 
-def blur_image(image: np.ndarray, psf_matrices: List[np.ndarray], plot: bool = False):
+def blur_image(image: np.ndarray, psf_matrices: List[np.ndarray], plot: bool = False, save: bool = True):
+    images_directory = "blurred_images"
+    if save and not os.path.exists(images_directory):
+        os.makedirs(images_directory)
+
     blurred_images = []
-    for psf_matrix in psf_matrices:
+    for index, psf_matrix in enumerate(psf_matrices):
         blurred = convolve2d(image, psf_matrix, mode="same")
         blurred_images.append(blurred)
 
         if plot:
             plt.imshow(blurred, cmap="gray")
             plt.show()
+        if save:
+            plt.imsave(os.path.join(images_directory, f"image_{index}.png"), blurred, cmap="gray")
 
     return blurred_images
 
 
-def restore_image(blurred_images: List[np.ndarray], p: float, plot: bool = False):
+def restore_image(blurred_images: List[np.ndarray], p: float, plot: bool = False, save: bool = True):
+    image_directory = "restored_images"
+    if save and not os.path.exists(image_directory):
+        os.makedirs(image_directory)
+
     # Restore the image
     fourier_images = np.stack([fft2(image) for image in blurred_images], axis=0)
 
-    # x_freq, y_freq = (fftfreq(dim_size) for dim_size in blurred_images[0].shape)
-    # frequencies = np.stack(np.meshgrid(y_freq, x_freq), axis=0)
-    # frequency_weights = np.prod(np.sinc(frequencies), axis=0)
-    frequency_weights = 1
+    x_freq, y_freq = (fftfreq(dim_size) for dim_size in blurred_images[0].shape)
+    frequencies = np.stack(np.meshgrid(y_freq, x_freq), axis=0)
+    frequency_weights = np.prod(np.sinc(frequencies), axis=0)
 
     restored_images = []
     cumulative_weights = np.zeros_like(blurred_images[0])
     cumulative_fourier_image = np.zeros_like(blurred_images[0], dtype=complex)
 
-    for fourier_image in fourier_images:
+    for index, fourier_image in enumerate(fourier_images):
         if p == float("inf"):
             # as p -> \infty, the average becomes a maximum
-            weights = np.full_like(fourier_image, np.mean(np.abs(fourier_image)), dtype=float)
-            # weights = np.abs(fourier_image)
+            weights = np.abs(fourier_image)
 
             mask = weights > cumulative_weights
             cumulative_weights[mask] = weights[mask]
@@ -86,11 +101,11 @@ def restore_image(blurred_images: List[np.ndarray], p: float, plot: bool = False
 
             fourier_image = cumulative_fourier_image / frequency_weights
         else:
-            # weights = np.mean(np.abs(fourier_image)) ** p
             weights = np.abs(fourier_image) ** p
+            weights /= np.max(weights)
 
             cumulative_weights += weights
-            cumulative_fourier_image += weights * fourier_image
+            cumulative_fourier_image += fourier_image * weights
 
             fourier_image = cumulative_fourier_image / cumulative_weights
             fourier_image /= frequency_weights
@@ -101,11 +116,13 @@ def restore_image(blurred_images: List[np.ndarray], p: float, plot: bool = False
         if plot:
             plt.imshow(restored_image, cmap="gray")
             plt.show()
+        if save:
+            plt.imsave(os.path.join(image_directory, f"image_{index}.png"), restored_image, cmap="gray")
 
     return restored_images
 
 
-def calculate_psnr(restored_images: List[np.ndarray], original_image: np.ndarray, plot: bool = True):
+def calculate_psnr(restored_images: List[np.ndarray], original_image: np.ndarray, plot: bool = True, save: bool = True):
     psnr_values = []
     for image in restored_images:
         mse = np.mean((original_image - image) ** 2)
@@ -114,7 +131,13 @@ def calculate_psnr(restored_images: List[np.ndarray], original_image: np.ndarray
 
     if plot:
         plt.plot(psnr_values)
+        plt.title("PSNR of the restored images")
+        plt.xlabel("PSNR value")
+        plt.ylabel("Number of blurred image used")
         plt.show()
+
+    if save:
+        np.savetxt("psnr_values.csv", psnr_values)
 
     return psnr_values
 
@@ -127,8 +150,8 @@ def main():
     original_image = plt.imread(IMAGE_PATH)[..., 0]
     blurred_images = blur_image(original_image, psf_matrices, plot=False)
 
-    restore_images = restore_image(blurred_images, p=15, plot=True)
-    calculate_psnr(restore_images, original_image)
+    restore_images = restore_image(blurred_images, p=15, plot=False)
+    calculate_psnr(restore_images, original_image, plot=True)
 
 
 if __name__ == '__main__':
